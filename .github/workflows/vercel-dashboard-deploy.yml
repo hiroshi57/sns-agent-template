@@ -55,18 +55,24 @@ jobs:
         run: npm install -g vercel@latest
 
       # ── VERCEL_TOKEN チェック ────────────────────────────────────
+      # 未設定の場合は fail ではなく skip する（テンプレート初期状態で
+      # ダッシュボードを使わない利用者の CI を汚さないため）
       - name: VERCEL_TOKEN チェック
+        id: token_check
         run: |
           if [ -z "${{ secrets.VERCEL_TOKEN }}" ]; then
-            echo "⚠️  VERCEL_TOKEN が未設定です"
-            echo "   GitHub → Settings → Secrets → VERCEL_TOKEN を追加してください"
+            echo "⏭️  VERCEL_TOKEN が未設定のためデプロイをスキップします"
+            echo "   有効化する場合: GitHub → Settings → Secrets → VERCEL_TOKEN を追加"
             echo "   取得: https://vercel.com/account/tokens"
-            exit 1
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "✅ VERCEL_TOKEN 確認済み"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
-          echo "✅ VERCEL_TOKEN 確認済み"
 
       # ── Vercel デプロイ ──────────────────────────────────────────
       - name: Vercel デプロイ（Production）
+        if: steps.token_check.outputs.skip != 'true'
         working-directory: apps/dashboard
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
@@ -84,7 +90,7 @@ jobs:
 
       # ── サマリー ─────────────────────────────────────────────────
       - name: デプロイサマリーを表示
-        if: always()
+        if: always() && steps.token_check.outputs.skip != 'true'
         run: |
           echo "### 🚀 Vercel ダッシュボード自動デプロイ" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
