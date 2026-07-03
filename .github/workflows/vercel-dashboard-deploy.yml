@@ -1,0 +1,116 @@
+name: Vercel ダッシュボード自動デプロイ
+
+# ─────────────────────────────────────────────────────────────────
+# 目的:
+#   main ブランチに push されたとき、apps/dashboard/ 以下に
+#   変更があれば自動で Vercel にデプロイする。
+#
+# 必要な Secret:
+#   VERCEL_TOKEN — Vercel アカウントの API トークン
+#     作成方法: https://vercel.com/account/tokens
+#
+# 設定情報（自動検出）:
+#   .vercel/project.json から projectId / orgId を読み込む。
+# ─────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      # ダッシュボード本体
+      - 'apps/dashboard/**'
+      # データ層（github-data.ts が読む data/ ファイル）
+      - 'data/affiliate-products.json'
+      - 'data/strategy.json'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '変更なしでも強制デプロイ'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['true', 'false']
+
+jobs:
+  deploy:
+    name: Vercel デプロイ
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: apps/dashboard/package-lock.json
+
+      - name: Install Vercel CLI
+        run: npm install -g vercel@latest
+
+      # ── VERCEL_TOKEN チェック ────────────────────────────────────
+      - name: VERCEL_TOKEN チェック
+        run: |
+          if [ -z "${{ secrets.VERCEL_TOKEN }}" ]; then
+            echo "⚠️  VERCEL_TOKEN が未設定です"
+            echo "   GitHub → Settings → Secrets → VERCEL_TOKEN を追加してください"
+            echo "   取得: https://vercel.com/account/tokens"
+            exit 1
+          fi
+          echo "✅ VERCEL_TOKEN 確認済み"
+
+      # ── Vercel デプロイ ──────────────────────────────────────────
+      - name: Vercel デプロイ（Production）
+        working-directory: apps/dashboard
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          vercel deploy --prod \
+            --token="$VERCEL_TOKEN" \
+            --yes \
+            2>&1 | tee /tmp/vercel-output.txt
+
+          DEPLOY_URL=$(grep -oE 'https://[^ ]+\.vercel\.app' /tmp/vercel-output.txt | tail -1)
+          echo "DEPLOY_URL=${DEPLOY_URL}" >> "$GITHUB_ENV"
+          echo "✅ デプロイ完了: ${DEPLOY_URL}"
+
+      # ── サマリー ─────────────────────────────────────────────────
+      - name: デプロイサマリーを表示
+        if: always()
+        run: |
+          echo "### 🚀 Vercel ダッシュボード自動デプロイ" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| 項目 | 値 |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| **本番 URL** | https://your-dashboard.vercel.app |" >> $GITHUB_STEP_SUMMARY
+          if [ -n "$DEPLOY_URL" ]; then
+            echo "| **デプロイ URL** | $DEPLOY_URL |" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "| **トリガー** | ${{ github.event_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **コミット** | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+
+      # ── 失敗時の案内 ─────────────────────────────────────────────
+      - name: デプロイ失敗の案内
+        if: failure()
+        run: |
+          echo ""
+          echo "============================================"
+          echo "❌ Vercel デプロイに失敗しました"
+          echo "============================================"
+          echo ""
+          echo "よくある原因:"
+          echo "  1. VERCEL_TOKEN が未設定または期限切れ"
+          echo "     → https://vercel.com/account/tokens で再生成"
+          echo "  2. Next.js ビルドエラー"
+          echo "     → ローカルで cd apps/dashboard && npm run build を確認"
+          echo "  3. Vercel プロジェクトのリンクが切れている"
+          echo "     → cd apps/dashboard && vercel link --scope YOUR_VERCEL_SCOPE"
+          echo ""

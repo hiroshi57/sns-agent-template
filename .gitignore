@@ -1,0 +1,25 @@
+node_modules/
+dist/
+logs/
+tmp/
+
+# Next.js ビルド成果物
+.next/
+out/
+.env
+.env.local
+*.env
+session.json
+# state/ は全体をコミット禁止（セッションCookie等の機微情報を含むため — CLAUDE.md 禁止事項）
+state/
+data/posted-urls.json
+data/x-posted-urls.json
+# アナリティクスはダッシュボード用に追跡する（x-analytics.jsonl / x-slot-summary.jsonl）
+
+# Claude Code ランタイム（コミット不要 — セッションログ含め全体を除外）
+.claude/state/
+.claude/sessions/
+.claude/agent-memory/
+
+# 入れ子ディレクトリ（誤 submodule 登録を防ぐ）
+chatwork-x-automation/

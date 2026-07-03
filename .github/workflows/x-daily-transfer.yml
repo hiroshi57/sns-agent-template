@@ -1,0 +1,269 @@
+name: Chatwork → X 自動投稿
+
+on:
+  schedule:
+    # slot07: 毎日 07:30 JST = UTC 前日 22:30 (平日+週末)
+    - cron: '30 22 * * *'
+    # slot11: 毎日 11:00 JST = UTC 02:00 (平日+週末)
+    - cron: '0 2 * * *'
+    # slot12: 毎日 13:00 JST = UTC 04:00 (平日+週末)
+    - cron: '0 4 * * *'
+    # slot14: 平日 16:00 JST = UTC 07:00 (月〜金)
+    - cron: '0 7 * * 1-5'
+    # slot17: 平日 18:00 JST = UTC 09:00 (月〜金)
+    - cron: '0 9 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'dry-run モード（X への投稿をスキップ）'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['true', 'false']
+      slot:
+        description: '実行スロット（省略時は schedule から自動判定）'
+        required: false
+        default: ''
+        type: choice
+        options: ['', 'slot07', 'slot11', 'slot12', 'slot14', 'slot17']
+
+jobs:
+  x-transfer:
+    name: X 投稿
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install --prefer-offline
+
+      # ── スロット自動判定 ──────────────────────────────────────
+      # schedule トリガーは github.event.schedule に cron 式が入る
+      # 手動実行時（inputs.slot 指定）はそちらを優先
+      - name: スロット自動判定
+        id: slot-detect
+        run: |
+          MANUAL="${{ github.event.inputs.slot }}"
+          SCHEDULE="${{ github.event.schedule }}"
+
+          if [ -n "$MANUAL" ]; then
+            SLOT="$MANUAL"
+            echo "手動指定スロット: $SLOT"
+          else
+            case "$SCHEDULE" in
+              "30 22 * * *")   SLOT="slot07" ;;  # 毎日（平日+週末）
+              "0 2 * * *")     SLOT="slot11" ;;  # 毎日
+              "0 4 * * *")     SLOT="slot12" ;;  # 毎日
+              "0 7 * * 1-5")   SLOT="slot14" ;;
+              "0 9 * * 1-5")   SLOT="slot17" ;;
+              *)
+                echo "⚠️  schedule='$SCHEDULE' が未知の値です。slot07 にフォールバックします。"
+                SLOT="slot07"
+                ;;
+            esac
+            echo "schedule から判定したスロット: $SLOT (schedule='$SCHEDULE')"
+          fi
+
+          echo "SLOT=$SLOT" >> "$GITHUB_ENV"
+          echo "slot=$SLOT" >> "$GITHUB_OUTPUT"
+
+      - name: Install Playwright browsers
+        run: npx playwright install chromium --with-deps
+
+      # ── X セッション復元（keepalive キャッシュ優先 → Secret フォールバック）──
+      - name: Restore X session from keepalive cache
+        id: session-cache
+        uses: actions/cache@v4
+        with:
+          path: state/x-session.json
+          key: x-session-refreshed-${{ github.ref }}-${{ github.run_id }}
+          restore-keys: |
+            x-session-refreshed-${{ github.ref }}-
+
+      - name: Restore X session from Secret (fallback)
+        if: steps.session-cache.outputs.cache-hit != 'true'
+        env:
+          X_SESSION_JSON: ${{ secrets.X_SESSION_JSON }}
+        run: |
+          mkdir -p state logs tmp
+          if [ -n "$X_SESSION_JSON" ]; then
+            echo "$X_SESSION_JSON" > state/x-session.json
+            echo "✅ Secret から state/x-session.json を復元しました"
+          else
+            echo "⚠️  X_SESSION_JSON が未設定のため x-session.json なしで起動します"
+          fi
+
+      - name: Ensure directories exist
+        run: mkdir -p state logs tmp data
+
+      # ── 投稿済み URL キャッシュ（二重投稿防止）──────────────
+      # ネタ系（relief）・アフィリエイトの重複防止キャッシュも永続化する
+      - name: Restore posted-URLs cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/x-posted-urls.json
+            data/x-relief-posted-urls.json
+            data/x-affiliate-posted.json
+          key: x-posted-urls-${{ github.ref }}-${{ github.run_id }}
+          restore-keys: |
+            x-posted-urls-${{ github.ref }}-
+
+      - name: Initialize posted-URLs if missing
+        run: |
+          if [ ! -f data/x-posted-urls.json ]; then
+            echo '{"version":1,"entries":[]}' > data/x-posted-urls.json
+            echo "x-posted-urls.json を空で初期化しました"
+          else
+            echo "x-posted-urls.json を復元済み"
+          fi
+
+      # ── analytics データ（PDCA と共有）──────────────────────
+      # restore-keys prefix を pdca-cycle.yml と完全一致させることで
+      # 両ワークフロー間でデータを共有できる
+      - name: Restore analytics cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/x-analytics.jsonl
+            data/x-slot-summary.jsonl
+            data/strategy.json
+            data/pdca-history.jsonl
+            data/note-weekly-log.json
+          key: analytics-data-${{ github.ref }}-${{ github.run_id }}
+          restore-keys: |
+            analytics-data-${{ github.ref }}-
+
+      # ── git から最新 analytics を取得（cache より git を優先）──
+      # cache は7日で失効するため、git を正とする。
+      # git 上にファイルがなければ（初回）空ファイルを用意する。
+      - name: Pull latest analytics from git
+        run: |
+          git fetch origin main --quiet
+          git checkout origin/main -- data/x-analytics.jsonl data/x-slot-summary.jsonl 2>/dev/null || true
+          touch data/x-analytics.jsonl data/x-slot-summary.jsonl
+          echo "=== analytics 件数（git 最新版）==="
+          wc -l data/x-analytics.jsonl data/x-slot-summary.jsonl
+
+      # ── Anthropic API キー事前検証 ──────────────────────────
+      # 401 で失敗した場合、即座に job を失敗させて notify-on-failure で通知する。
+      - name: ANTHROPIC_API_KEY 検証
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CHATWORK_API_TOKEN: ${{ secrets.CHATWORK_API_TOKEN }}
+          CHATWORK_ROOM_ID: ${{ secrets.CHATWORK_ROOM_ID }}
+        run: |
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST https://api.anthropic.com/v1/messages \
+            -H "x-api-key: ${ANTHROPIC_API_KEY}" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d '{"model":"claude-haiku-4-5-20251001","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}')
+          echo "Anthropic API レスポンス: ${HTTP_STATUS}"
+          if [ "$HTTP_STATUS" = "401" ]; then
+            echo "❌ ANTHROPIC_API_KEY が無効または失効しています (HTTP 401)"
+            if [ -n "$CHATWORK_API_TOKEN" ] && [ -n "$CHATWORK_ROOM_ID" ]; then
+              NL=$'\n'
+              curl -s -X POST "https://api.chatwork.com/v2/rooms/${CHATWORK_ROOM_ID}/messages" \
+                -H "X-ChatWorkToken: ${CHATWORK_API_TOKEN}" \
+                --data-urlencode "body=[info][title]🔑 APIキー失効アラート[/title]ANTHROPIC_API_KEY が無効です。${NL}Anthropic Console でキーを更新し、GitHub Secrets を更新してください。${NL}https://console.anthropic.com/settings/keys[/info]"
+            fi
+            exit 1
+          fi
+          echo "✅ ANTHROPIC_API_KEY 有効"
+
+      # ── 投稿実行 ────────────────────────────────────────────
+      - name: Chatwork → X 自動投稿を実行 (${{ env.SLOT }})
+        env:
+          CHATWORK_API_TOKEN: ${{ secrets.CHATWORK_API_TOKEN }}
+          CHATWORK_ROOM_ID: ${{ secrets.CHATWORK_ROOM_ID }}
+          CHATWORK_TARGET_ACCOUNT_IDS: ${{ secrets.CHATWORK_TARGET_ACCOUNT_IDS }}
+          X_EMAIL: ${{ secrets.X_EMAIL }}
+          X_PASSWORD: ${{ secrets.X_PASSWORD }}
+          X_USERNAME: ${{ secrets.X_USERNAME }}
+          X_PHONE: ${{ secrets.X_PHONE }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          CI: 'true'
+        run: npm run x:once -- --slot "$SLOT"
+
+      # ── 投稿0件サイレント失敗チェック ──────────────────────
+      - name: 投稿件数チェック（0件アラート）
+        if: success() && github.event.inputs.dry_run != 'true'
+        env:
+          CHATWORK_API_TOKEN: ${{ secrets.CHATWORK_API_TOKEN }}
+          CHATWORK_ROOM_ID: ${{ secrets.CHATWORK_ROOM_ID }}
+          SLOT: ${{ env.SLOT }}
+        run: |
+          TODAY=$(date -u '+%Y-%m-%d')
+          COUNT=$(grep -c "\"${TODAY}\"" data/x-analytics.jsonl 2>/dev/null || echo 0)
+          echo "本日の投稿数（X）: ${COUNT} 件"
+          if [ "$COUNT" -eq 0 ]; then
+            echo "⚠️  投稿数が 0 件です。Chatwork に通知します。"
+            NL=$'\n'
+            curl -s -X POST "https://api.chatwork.com/v2/rooms/${CHATWORK_ROOM_ID}/messages" \
+              -H "X-ChatWorkToken: ${CHATWORK_API_TOKEN}" \
+              --data-urlencode "body=[info][title]⚠️ X投稿 0件アラート — ${SLOT}[/title]スロット ${SLOT} が成功終了しましたが、本日の投稿数が 0 件です。${NL}コンテンツフィルタや重複除外の可能性があります。${NL}ログを確認してください: https://github.com/${{ github.repository }}/actions[/info]" 2>/dev/null || true
+          fi
+
+      # ── analytics をリポジトリに書き戻す ────────────────────
+      # x-analytics.jsonl / x-slot-summary.jsonl を main に push。
+      # PDCA サイクルと ダッシュボード が実データを参照できるようになる。
+      - name: Save analytics to repository
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SLOT: ${{ env.SLOT }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          echo "=== push 前 analytics 件数 ==="
+          wc -l data/x-analytics.jsonl data/x-slot-summary.jsonl 2>/dev/null || true
+          git add -f data/x-analytics.jsonl data/x-slot-summary.jsonl 2>/dev/null || true
+          if git diff --staged --quiet; then
+            echo "analytics 変更なし。スキップします。"
+          else
+            git commit -m "chore: update analytics ${SLOT} $(date -u +%Y-%m-%dT%H:%M:%SZ) [skip ci]"
+            for i in 1 2 3 4 5; do
+              if git push origin HEAD:main; then
+                echo "✅ analytics push 成功（試行 ${i}）"
+                break
+              fi
+              echo "⚠️  push 失敗（試行 ${i}/5）。fetch してリトライ..."
+              git fetch origin main
+              # 未ステージの変更を退避してから rebase（他ファイルの変更が邪魔するため）
+              git stash push --include-untracked -m "rebase-temp-${i}" 2>/dev/null || true
+              if git rebase origin/main; then
+                echo "rebase 成功"
+              else
+                echo "rebase 競合 → 自分のデータで解決"
+                git checkout --theirs data/x-analytics.jsonl data/x-slot-summary.jsonl 2>/dev/null || true
+                git add -f data/x-analytics.jsonl data/x-slot-summary.jsonl
+                git rebase --continue || git rebase --skip
+              fi
+              git stash pop 2>/dev/null || true
+              sleep $(( (RANDOM % 10) + 5 ))
+            done
+          fi
+
+      # ── ログ・成果物 ─────────────────────────────────────────
+      - name: Upload logs（常時）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: x-logs-${{ env.SLOT }}-${{ github.run_id }}
+          path: logs/
+          retention-days: 7

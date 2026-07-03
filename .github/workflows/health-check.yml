@@ -1,0 +1,103 @@
+name: 日次ヘルスチェック
+
+# ─────────────────────────────────────────────────────────────────
+# 毎朝 08:00 JST に昨日の投稿実績を確認し、
+# 投稿ゼロ / 目標未達の場合は Chatwork に即時アラートを送る。
+#
+# 必須 GitHub Secrets:
+#   CHATWORK_API_TOKEN
+#   CHATWORK_ROOM_ID
+# ─────────────────────────────────────────────────────────────────
+
+on:
+  schedule:
+    # 毎日 08:00 JST = UTC 23:00 (前日)
+    - cron: '0 23 * * *'
+  workflow_dispatch:
+
+jobs:
+  health-check:
+    name: 投稿実績ヘルスチェック
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Pull latest analytics from git
+        run: |
+          git fetch origin main --quiet
+          git checkout origin/main -- data/x-analytics.jsonl 2>/dev/null || true
+          touch data/x-analytics.jsonl
+
+      - name: 昨日の投稿数を集計してアラート判定
+        env:
+          CHATWORK_API_TOKEN: ${{ secrets.CHATWORK_API_TOKEN }}
+          CHATWORK_ROOM_ID: ${{ secrets.CHATWORK_ROOM_ID }}
+        run: |
+          # 昨日の日付（UTC-9 → JST = UTC+9 なので前日の UTC 日付を使用）
+          YESTERDAY=$(date -u -d '1 day ago' '+%Y-%m-%d' 2>/dev/null || date -u -v-1d '+%Y-%m-%d')
+          echo "チェック対象日: ${YESTERDAY} (JST)"
+
+          COUNT=$(grep -c "\"${YESTERDAY}\"" data/x-analytics.jsonl 2>/dev/null || echo 0)
+          SUCCESS=$(grep "\"${YESTERDAY}\"" data/x-analytics.jsonl 2>/dev/null | grep '"success":true' | wc -l | tr -d ' ')
+          echo "昨日の X 投稿数: ${COUNT} 件（成功: ${SUCCESS} 件）"
+
+          TARGET=15
+          STATUS="ok"
+          ICON="✅"
+          MESSAGE=""
+          NL=$'\n'
+
+          if [ "$COUNT" -eq 0 ]; then
+            STATUS="zero"
+            ICON="🚨"
+            MESSAGE="[info][title]🚨 投稿ゼロ アラート — ${YESTERDAY}[/title]昨日（${YESTERDAY}）のX投稿数が 0 件です。${NL}ワークフローの失敗またはAPIキー失効が疑われます。${NL}${NL}即座に確認してください:${NL}• GitHub Actions ログ: https://github.com/${{ github.repository }}/actions${NL}• Anthropic Console: https://console.anthropic.com/settings/keys[/info]"
+          elif [ "$SUCCESS" -lt "$TARGET" ]; then
+            STATUS="warn"
+            ICON="⚠️"
+            MESSAGE="[info][title]⚠️ 投稿数 目標未達 — ${YESTERDAY}[/title]昨日（${YESTERDAY}）の投稿成功数: ${SUCCESS}件 / 目標: ${TARGET}件${NL}達成率: $(( SUCCESS * 100 / TARGET ))%${NL}${NL}GitHub Actions を確認してください:${NL}https://github.com/${{ github.repository }}/actions[/info]"
+          else
+            echo "✅ ${YESTERDAY}: ${SUCCESS}件投稿 — 正常"
+          fi
+
+          # アラートがある場合のみ Chatwork 通知
+          if [ -n "$MESSAGE" ]; then
+            echo "${ICON} アラート送信: status=${STATUS}"
+            curl -s -X POST "https://api.chatwork.com/v2/rooms/${CHATWORK_ROOM_ID}/messages" \
+              -H "X-ChatWorkToken: ${CHATWORK_API_TOKEN}" \
+              --data-urlencode "body=${MESSAGE}" \
+              && echo "✅ Chatwork 通知送信完了" \
+              || echo "⚠️  Chatwork 通知失敗"
+
+            # 投稿ゼロの場合はジョブを失敗させてログに残す
+            if [ "$STATUS" = "zero" ]; then
+              exit 1
+            fi
+          fi
+
+      - name: ANTHROPIC_API_KEY 有効期限チェック
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CHATWORK_API_TOKEN: ${{ secrets.CHATWORK_API_TOKEN }}
+          CHATWORK_ROOM_ID: ${{ secrets.CHATWORK_ROOM_ID }}
+        run: |
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST https://api.anthropic.com/v1/messages \
+            -H "x-api-key: ${ANTHROPIC_API_KEY}" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d '{"model":"claude-haiku-4-5-20251001","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}')
+          echo "Anthropic API レスポンス: ${HTTP_STATUS}"
+          if [ "$HTTP_STATUS" = "401" ]; then
+            echo "❌ ANTHROPIC_API_KEY が無効"
+            NL=$'\n'
+            curl -s -X POST "https://api.chatwork.com/v2/rooms/${CHATWORK_ROOM_ID}/messages" \
+              -H "X-ChatWorkToken: ${CHATWORK_API_TOKEN}" \
+              --data-urlencode "body=[info][title]🔑 APIキー失効アラート[/title]ANTHROPIC_API_KEY が無効または失効しています。${NL}今すぐ更新してください:${NL}1. https://console.anthropic.com/settings/keys で新しいキーを発行${NL}2. GitHub Secrets → ANTHROPIC_API_KEY を更新${NL}3. health-check ワークフローを手動再実行して確認[/info]"
+            exit 1
+          fi
+          echo "✅ ANTHROPIC_API_KEY 有効"

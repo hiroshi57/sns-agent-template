@@ -1,0 +1,279 @@
+name: Instagram / Threads 自動投稿
+
+# ─────────────────────────────────────────────────────────────────
+# X.com 投稿（slot07: 07:30）の約 30 分後に同じ記事を
+# Instagram + Threads に自動投稿する。
+#
+# スロット構成（平日のみ）:
+#   slot07: 08:00 JST = UTC 23:00 (日〜木)  ← X.com と 30分ずらし
+#   slot12: 12:30 JST = UTC 03:30 (月〜金)
+#   slot14: 14:30 JST = UTC 05:30 (月〜金)
+#   slot17: 18:30 JST = UTC 09:30 (月〜金)
+#
+# 必要な GitHub Secrets:
+#   INSTAGRAM_USERNAME  … Instagram ユーザー名（@なし）
+#   INSTAGRAM_PASSWORD  … Instagram パスワード
+#   INSTAGRAM_SESSION_JSON … ローカルで npm run instagram:setup を実行して取得
+#   CHATWORK_API_TOKEN / CHATWORK_ROOM_ID / CHATWORK_TARGET_ACCOUNT_IDS
+#   ANTHROPIC_API_KEY
+# ─────────────────────────────────────────────────────────────────
+
+on:
+  schedule:
+    # slot07: 08:00 JST = UTC 23:00 (毎日)
+    - cron: '0 23 * * *'
+    # slot12: 12:30 JST = UTC 03:30 (毎日)
+    - cron: '30 3 * * *'
+    # slot14: 14:30 JST = UTC 05:30 (毎日)
+    - cron: '30 5 * * *'
+    # slot17: 18:30 JST = UTC 09:30 (毎日)
+    - cron: '30 9 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'dry-run モード（Instagram への投稿をスキップ）'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['true', 'false']
+      slot:
+        description: '実行スロット（省略時は schedule から自動判定）'
+        required: false
+        default: ''
+        type: choice
+        options: ['', 'slot07', 'slot12', 'slot14', 'slot17']
+      post_threads:
+        description: 'Threads にも同時投稿する'
+        required: false
+        default: 'true'
+        type: choice
+        options: ['true', 'false']
+
+jobs:
+  instagram-post:
+    name: Instagram/Threads 投稿
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install --prefer-offline
+
+      - name: Install Playwright browsers
+        run: npx playwright install chromium --with-deps
+
+      # ── スロット自動判定 ──────────────────────────────────────
+      - name: スロット自動判定
+        id: slot-detect
+        run: |
+          MANUAL="${{ github.event.inputs.slot }}"
+          SCHEDULE="${{ github.event.schedule }}"
+
+          if [ -n "$MANUAL" ]; then
+            SLOT="$MANUAL"
+            echo "手動指定スロット: $SLOT"
+          else
+            case "$SCHEDULE" in
+              "0 23 * * *")     SLOT="slot07" ;;
+              "30 3 * * *")     SLOT="slot12" ;;
+              "30 5 * * *")     SLOT="slot14" ;;
+              "30 9 * * *")     SLOT="slot17" ;;
+              *)
+                echo "⚠️  schedule='$SCHEDULE' が未知。slot07 にフォールバック"
+                SLOT="slot07"
+                ;;
+            esac
+            echo "schedule から判定: $SLOT"
+          fi
+          echo "SLOT=$SLOT" >> "$GITHUB_ENV"
+
+      # ── Instagram セッション復元（keepalive キャッシュ優先 → Secret）──
+      - name: Restore Instagram session from keepalive cache
+        id: ig-session-cache
+        uses: actions/cache@v4
+        with:
+          path: state/instagram-session.json
+          key: instagram-session-refreshed-${{ github.ref }}-${{ github.run_id }}
+          restore-keys: |
+            instagram-session-refreshed-${{ github.ref }}-
+
+      - name: Restore Instagram session from Secret (fallback)
+        if: steps.ig-session-cache.outputs.cache-hit != 'true'
+        env:
+          INSTAGRAM_SESSION_JSON: ${{ secrets.INSTAGRAM_SESSION_JSON }}
+        run: |
+          mkdir -p state logs tmp
+          if [ -n "$INSTAGRAM_SESSION_JSON" ]; then
+            echo "$INSTAGRAM_SESSION_JSON" > state/instagram-session.json
+            echo "✅ INSTAGRAM_SESSION_JSON から復元しました"
+          else
+            echo "⚠️  INSTAGRAM_SESSION_JSON が未設定です"
+            echo "   ローカルで npm run instagram:setup を実行してください"
+          fi
+
+      - name: Ensure directories exist
+        run: mkdir -p state logs tmp data
+
+      # ── analytics データ（投稿済み URL キャッシュ + KPI）──────
+      - name: Restore Instagram posted-URLs cache
+        uses: actions/cache@v4
+        with:
+          path: data/instagram-posted-urls.json
+          key: instagram-posted-urls-${{ github.ref }}-${{ github.run_id }}
+          restore-keys: |
+            instagram-posted-urls-${{ github.ref }}-
+
+      - name: Initialize Instagram posted-URLs if missing
+        run: |
+          if [ ! -f data/instagram-posted-urls.json ]; then
+            echo '{"version":1,"entries":[]}' > data/instagram-posted-urls.json
+          fi
+
+      - name: Restore analytics cache（KPI・戦略共有）
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/x-analytics.jsonl
+            data/x-slot-summary.jsonl
+            data/strategy.json
+          key: analytics-data-${{ github.ref }}-${{ github.run_id }}
+          restore-keys: |
+            analytics-data-${{ github.ref }}-
+
+      # ── git から最新 analytics を取得（cache より git を優先）──
+      - name: Pull latest analytics from git
+        run: |
+          git fetch origin main --quiet
+          git checkout origin/main -- data/x-analytics.jsonl data/x-slot-summary.jsonl 2>/dev/null || true
+          touch data/x-analytics.jsonl data/x-slot-summary.jsonl
+          echo "=== analytics 件数（git 最新版）==="
+          wc -l data/x-analytics.jsonl data/x-slot-summary.jsonl
+
+      # ── Anthropic API キー事前検証 ──────────────────────────
+      - name: ANTHROPIC_API_KEY 検証
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CHATWORK_API_TOKEN: ${{ secrets.CHATWORK_API_TOKEN }}
+          CHATWORK_ROOM_ID: ${{ secrets.CHATWORK_ROOM_ID }}
+        run: |
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST https://api.anthropic.com/v1/messages \
+            -H "x-api-key: ${ANTHROPIC_API_KEY}" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d '{"model":"claude-haiku-4-5-20251001","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}')
+          if [ "$HTTP_STATUS" = "401" ]; then
+            echo "❌ ANTHROPIC_API_KEY が無効または失効 (HTTP 401)"
+            NL=$'\n'
+            curl -s -X POST "https://api.chatwork.com/v2/rooms/${CHATWORK_ROOM_ID}/messages" \
+              -H "X-ChatWorkToken: ${CHATWORK_API_TOKEN}" \
+              --data-urlencode "body=[info][title]🔑 APIキー失効アラート (Instagram)[/title]ANTHROPIC_API_KEY が無効です。GitHub Secrets を更新してください。${NL}https://console.anthropic.com/settings/keys[/info]" 2>/dev/null || true
+            exit 1
+          fi
+          echo "✅ ANTHROPIC_API_KEY 有効"
+
+      # ── Instagram / Threads 投稿実行 ──────────────────────────
+      - name: Instagram / Threads 投稿を実行 (${{ env.SLOT }})
+        env:
+          CHATWORK_API_TOKEN: ${{ secrets.CHATWORK_API_TOKEN }}
+          CHATWORK_ROOM_ID: ${{ secrets.CHATWORK_ROOM_ID }}
+          CHATWORK_TARGET_ACCOUNT_IDS: ${{ secrets.CHATWORK_TARGET_ACCOUNT_IDS }}
+          INSTAGRAM_USERNAME: ${{ secrets.INSTAGRAM_USERNAME }}
+          INSTAGRAM_PASSWORD: ${{ secrets.INSTAGRAM_PASSWORD }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          INSTAGRAM_POST_THREADS: ${{ github.event.inputs.post_threads || 'true' }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          CI: 'true'
+        run: npm run instagram:once -- --slot "$SLOT"
+
+      # ── Instagram セッション保存（次回 keepalive として利用）──
+      - name: Save refreshed Instagram session to cache
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: state/instagram-session.json
+          key: instagram-session-refreshed-${{ github.ref }}-${{ github.run_id }}
+
+      # Secret への書き戻し（GH_PAT が設定されている場合のみ）
+      - name: Write back Instagram session to Secret
+        if: success() && env.GH_PAT != ''
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if [ -f state/instagram-session.json ]; then
+            cat state/instagram-session.json | gh secret set INSTAGRAM_SESSION_JSON --repo "$GH_REPO"
+            echo "✅ INSTAGRAM_SESSION_JSON を更新しました"
+          fi
+
+      # ── analytics をリポジトリに書き戻す ────────────────────
+      - name: Save analytics to repository
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SLOT: ${{ env.SLOT }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f data/x-analytics.jsonl data/x-slot-summary.jsonl 2>/dev/null || true
+          if git diff --staged --quiet; then
+            echo "analytics 変更なし。スキップします。"
+          else
+            git commit -m "chore: update analytics instagram-${SLOT} $(date -u +%Y-%m-%dT%H:%M:%SZ) [skip ci]"
+            for i in 1 2 3 4 5; do
+              if git push origin HEAD:main; then
+                echo "✅ analytics push 成功（試行 ${i}）"
+                break
+              fi
+              echo "⚠️  push 失敗（試行 ${i}/5）。fetch してリトライ..."
+              git fetch origin main
+              git stash push --include-untracked -m "rebase-temp-${i}" 2>/dev/null || true
+              if git rebase origin/main; then
+                echo "rebase 成功"
+              else
+                git checkout --theirs data/x-analytics.jsonl data/x-slot-summary.jsonl 2>/dev/null || true
+                git add -f data/x-analytics.jsonl data/x-slot-summary.jsonl
+                git rebase --continue || git rebase --skip
+              fi
+              git stash pop 2>/dev/null || true
+              sleep $(( (RANDOM % 10) + 5 ))
+            done
+          fi
+
+      # ── ログ ─────────────────────────────────────────────────
+      - name: Upload logs（常時）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: instagram-logs-${{ env.SLOT }}-${{ github.run_id }}
+          path: logs/
+          retention-days: 7
+
+      # ── 失敗時案内 ───────────────────────────────────────────
+      - name: Instagram セッション失効の案内（失敗時）
+        if: failure()
+        run: |
+          echo ""
+          echo "============================================"
+          echo "❌ Instagram への投稿に失敗しました"
+          echo "============================================"
+          echo ""
+          echo "セッション失効の場合:"
+          echo "  1. ローカルで npm run instagram:setup を実行"
+          echo "  2. state/instagram-session.json の内容を"
+          echo "     GitHub Secrets > INSTAGRAM_SESSION_JSON に貼り付け"
+          echo "  3. このワークフローを手動再実行"
+          echo ""

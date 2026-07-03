@@ -1,0 +1,34 @@
+# ─────────────────────────────────────────────────────────────
+# 秘密情報スキャン（gitleaks）
+#
+# 目的:
+#   APIキー・パスワード・セッションCookie などの秘密情報が
+#   誤ってコミットされていないかを push / PR ごとに検査する。
+#
+# 検出された場合はワークフローが fail する。
+# ローカル実行: docker run --rm -v $(pwd):/repo zricethezav/gitleaks:latest detect -s /repo
+# ─────────────────────────────────────────────────────────────
+name: 秘密情報スキャン（gitleaks）
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: リポジトリ取得（全履歴）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: gitleaks 実行
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

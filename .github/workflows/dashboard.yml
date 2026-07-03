@@ -1,0 +1,82 @@
+name: ダッシュボード更新
+
+# ─────────────────────────────────────────────────────────────────
+# 毎日 23:00 JST に analytics データからダッシュボードを生成して
+# GitHub Pages に公開する。
+#
+# 必要な設定:
+#   リポジトリ Settings > Pages > Source: gh-pages ブランチ / docs フォルダ
+# ─────────────────────────────────────────────────────────────────
+
+on:
+  schedule:
+    # 毎日 23:00 JST = UTC 14:00
+    - cron: '0 14 * * *'
+  workflow_dispatch:
+
+jobs:
+  update-dashboard:
+    name: ダッシュボード生成・公開
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Restore analytics cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/x-analytics.jsonl
+            data/x-slot-summary.jsonl
+          key: analytics-data-${{ github.ref }}-${{ github.run_id }}
+          restore-keys: |
+            analytics-data-${{ github.ref }}-
+
+      - name: Ensure data directory
+        run: mkdir -p data docs && touch data/x-analytics.jsonl
+
+      - name: ダッシュボード HTML 生成
+        run: node scripts/generate-dashboard.js
+
+      - name: docs/index.html を gh-pages ブランチに push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # gh-pages ブランチが存在するか確認
+          git fetch origin gh-pages 2>/dev/null || true
+
+          # 孤立ブランチとして gh-pages を作成/更新
+          git worktree add /tmp/gh-pages gh-pages 2>/dev/null || \
+            (git worktree add /tmp/gh-pages --orphan gh-pages && \
+             cd /tmp/gh-pages && git rm -rf . 2>/dev/null || true)
+
+          cp docs/index.html /tmp/gh-pages/index.html
+          cd /tmp/gh-pages
+          git add index.html
+          git diff --staged --quiet || \
+            git commit -m "chore: update dashboard [$(date -u +'%Y-%m-%d %H:%M UTC')]"
+          git push origin gh-pages
+
+      - name: 生成サマリーを表示
+        run: |
+          echo "### 📊 ダッシュボード更新完了" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- 生成ファイル: \`docs/index.html\`" >> $GITHUB_STEP_SUMMARY
+          LINES=$(wc -l < data/x-analytics.jsonl 2>/dev/null || echo 0)
+          echo "- analytics レコード数: ${LINES} 件" >> $GITHUB_STEP_SUMMARY
+          echo "- URL: https://${{ github.repository_owner }}.github.io/$(basename ${{ github.repository }})/" >> $GITHUB_STEP_SUMMARY

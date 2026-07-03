@@ -1,0 +1,177 @@
+name: PDCA 戦略分析サイクル
+
+# ─────────────────────────────────────────
+# Hermes Self-Improving Loop の "Cron" に相当
+#
+# 毎夜 22:00 JST に KPI を分析し戦略を更新する。
+# 翌朝の slot07 投稿時に新戦略が自動適用される。
+#
+# analytics データは x-daily-transfer.yml と同じ
+# cache キー prefix (analytics-data-<ref>-) を共有することで
+# 投稿ログが PDCA 分析に自動的に引き渡される。
+# ─────────────────────────────────────────
+
+on:
+  schedule:
+    # 毎夜 22:00 JST = UTC 13:00
+    - cron: '0 13 * * *'
+    # 週次レポート: 毎週月曜 09:00 JST = UTC 00:00（月曜）
+    - cron: '0 0 * * 1'
+    # 日次投稿数チェック (#39): 毎日 23:30 JST = UTC 14:30
+    - cron: '30 14 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'dry-run モード（strategy.json を更新しない）'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['true', 'false']
+      window_days:
+        description: 'KPI 集計ウィンドウ (日数)'
+        required: false
+        default: '7'
+        type: string
+      weekly_report:
+        description: '週次レポートを送信する'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['true', 'false']
+      daily_check:
+        description: '日次投稿数チェックを実行する'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['true', 'false']
+
+jobs:
+  pdca-analyze:
+    name: PDCA 分析・戦略更新
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install --prefer-offline
+
+      # ── analytics データ復元（x-daily-transfer.yml と共有）──
+      # x-daily-transfer.yml が保存した analytics-data-<ref>-<run_id> を
+      # restore-keys で最新版として取得する
+      - name: Restore analytics cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/x-analytics.jsonl
+            data/x-slot-summary.jsonl
+            data/strategy.json
+            data/pdca-history.jsonl
+            data/note-weekly-log.json
+          key: analytics-data-${{ github.ref }}-${{ github.run_id }}
+          restore-keys: |
+            analytics-data-${{ github.ref }}-
+
+      # ── git から最新 analytics を取得（cache より git を優先）──
+      - name: Pull latest analytics from git
+        run: |
+          mkdir -p data
+          git fetch origin main --quiet
+          git checkout origin/main -- data/x-analytics.jsonl data/x-slot-summary.jsonl data/strategy.json data/pdca-history.jsonl 2>/dev/null || true
+          touch data/x-analytics.jsonl data/x-slot-summary.jsonl
+          echo "data/ 初期化完了"
+
+      - name: analytics ファイルサイズを確認
+        run: |
+          echo "=== analytics データ確認 ==="
+          wc -l data/x-analytics.jsonl data/x-slot-summary.jsonl 2>/dev/null || echo "(ファイルなし)"
+          if [ -f data/strategy.json ]; then
+            echo "strategy.json 存在: $(stat -c%s data/strategy.json 2>/dev/null || wc -c < data/strategy.json) bytes"
+          else
+            echo "strategy.json: 未作成（初回実行）"
+          fi
+
+      # ── 日次投稿数チェック (#39) ───────────────────────────────
+      # 23:30 JST の cron または workflow_dispatch で daily_check=true のときのみ実行
+      - name: 日次投稿数チェック
+        if: |
+          github.event.schedule == '30 14 * * *' ||
+          github.event.inputs.daily_check == 'true'
+        env:
+          LINE_NOTIFY_TOKEN: ${{ secrets.LINE_NOTIFY_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          DRY="${{ github.event.inputs.dry_run || 'false' }}"
+          if [ "$DRY" = "true" ]; then
+            npx ts-node src/pdca-daily-check.ts --dry-run
+          else
+            npx ts-node src/pdca-daily-check.ts
+          fi
+
+      # ── PDCA 分析実行 ────────────────────────────────────────
+      - name: PDCA 分析を実行
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: |
+          DAYS="${{ github.event.inputs.window_days || '7' }}"
+          DRY="${{ github.event.inputs.dry_run || 'false' }}"
+          if [ "$DRY" = "true" ]; then
+            npm run pdca:analyze -- --dry-run --days="$DAYS"
+          else
+            npm run pdca:analyze -- --days="$DAYS"
+          fi
+
+      - name: PDCA ステータス出力
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: npm run pdca:status
+
+      # ── GitHub Actions Step Summary (#26) ───────────────────────
+      - name: PDCA Step Summary を生成
+        if: always()
+        run: node scripts/pdca-summary.js >> $GITHUB_STEP_SUMMARY
+
+      # ── 週次レポート送信 (#24) ────────────────────────────────
+      # 毎週月曜 (cron: '0 0 * * 1') または workflow_dispatch で weekly_report=true
+      - name: 週次 KPI レポートを送信
+        if: |
+          github.event.schedule == '0 0 * * 1' ||
+          github.event.inputs.weekly_report == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          LINE_NOTIFY_TOKEN: ${{ secrets.LINE_NOTIFY_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          DRY="${{ github.event.inputs.dry_run || 'false' }}"
+          if [ "$DRY" = "true" ]; then
+            npx ts-node src/pdca-weekly.ts --dry-run
+          else
+            npx ts-node src/pdca-weekly.ts
+          fi
+
+      # ── 成果物 ───────────────────────────────────────────────
+      - name: Upload PDCA logs（常時）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdca-logs-${{ github.run_id }}
+          path: |
+            data/strategy.json
+            data/pdca-history.jsonl
+            logs/
+          retention-days: 30

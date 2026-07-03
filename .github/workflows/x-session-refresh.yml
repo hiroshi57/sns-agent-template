@@ -1,0 +1,149 @@
+name: X セッション維持（keepalive）
+
+# ─────────────────────────────────────────────────────────────────
+# 目的:
+#   X.com のセッション Cookie を毎朝 slot07 の 1 時間前に更新し、
+#   「セッション失効によるログイン失敗」を防ぐ。
+#
+# フロー:
+#   1. X_SESSION_JSON Secret から state/x-session.json を復元
+#   2. npm run x:keepalive でブラウザを開き Cookie を更新
+#   3. 更新済み x-session.json を cache に保存
+#   4. x-daily-transfer.yml がキャッシュを優先的に読み込む
+#
+# ⚠️ Secret 書き戻しについて:
+#   GitHub Secrets への書き戻しには GH_PAT (secrets:write 権限) が必要。
+#   未設定の場合はキャッシュ経由のセッション共有のみ行う。
+#   設定方法: GitHub → Settings → Secrets → GH_PAT を追加（repo+secrets scope）
+# ─────────────────────────────────────────────────────────────────
+
+on:
+  schedule:
+    # 毎朝 06:30 JST = UTC 前日 21:30 (毎日・土日含む)
+    # → slot07 (07:30 JST) の 1 時間前に実行
+    - cron: '30 21 * * *'
+    # 昼 12:30 JST = UTC 03:30 (毎日)
+    # → slot14 (16:00 JST) 前にセッションを再確認
+    - cron: '30 3 * * *'
+  workflow_dispatch:
+    inputs:
+      force_relogin:
+        description: '強制再ログイン（セッション破棄して再認証）'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['true', 'false']
+
+jobs:
+  keepalive:
+    name: X セッション keepalive
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install --prefer-offline
+
+      - name: Install Playwright browsers
+        run: npx playwright install chromium --with-deps
+
+      # ── セッション復元 ────────────────────────────────────────
+      - name: Restore X session from Secret
+        env:
+          X_SESSION_JSON: ${{ secrets.X_SESSION_JSON }}
+        run: |
+          mkdir -p state logs tmp
+          if [ -n "$X_SESSION_JSON" ]; then
+            echo "$X_SESSION_JSON" > state/x-session.json
+            echo "✅ X_SESSION_JSON から state/x-session.json を復元しました"
+          else
+            echo "❌ X_SESSION_JSON が未設定です"
+            echo "   npm run x:setup を実行してセッションを初期化してください"
+            exit 1
+          fi
+
+      # ── keepalive 実行 ────────────────────────────────────────
+      - name: X.com セッション維持（Cookie 更新）
+        env:
+          CI: 'true'
+        run: |
+          npm run x:keepalive
+          echo "✅ keepalive 完了 - state/x-session.json を更新しました"
+
+      # ── 更新済みセッションをキャッシュに保存 ─────────────────
+      # x-daily-transfer.yml は restore-keys: x-session-refreshed-<ref>-
+      # で最新のキャッシュを取得する
+      - name: Cache updated X session
+        uses: actions/cache@v4
+        with:
+          path: state/x-session.json
+          key: x-session-refreshed-${{ github.ref }}-${{ github.run_id }}
+
+      # ── Secret 書き戻し（GH_PAT が設定されている場合のみ）────
+      - name: Update X_SESSION_JSON Secret (optional)
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "⏭️  GH_PAT 未設定のため Secret 更新をスキップ"
+            exit 0
+          fi
+          if [ -f state/x-session.json ]; then
+            SESSION_CONTENT=$(cat state/x-session.json)
+            gh secret set X_SESSION_JSON --body "$SESSION_CONTENT"
+            echo "✅ X_SESSION_JSON Secret を更新しました"
+          else
+            echo "⚠️  state/x-session.json が見つかりません。Secret 更新をスキップ"
+          fi
+
+      # ── ログ ─────────────────────────────────────────────────
+      - name: Upload logs（常時）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: keepalive-logs-${{ github.run_id }}
+          path: logs/
+          retention-days: 7
+
+      # ── 失敗時の Webhook 通知 + 案内 ────────────────────────
+      - name: セッション失効の通知（失敗時）
+        if: failure()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          LINE_NOTIFY_TOKEN: ${{ secrets.LINE_NOTIFY_TOKEN }}
+        run: |
+          echo ""
+          echo "============================================"
+          echo "❌ X セッションの維持に失敗しました"
+          echo "============================================"
+          echo ""
+          echo "対処方法:"
+          echo "  1. ローカルで npm run x:setup を実行"
+          echo "  2. state/x-session.json の内容を"
+          echo "     GitHub Secrets > X_SESSION_JSON に貼り付け"
+          echo "  3. このワークフローを手動再実行"
+          echo ""
+
+          MSG="🔴 X セッション失効: keepalive が失敗しました。npm run x:setup → Secret 更新が必要です。https://github.com/${{ github.repository }}/actions"
+
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            curl -s -X POST "$SLACK_WEBHOOK_URL" \
+              -H 'Content-type: application/json' \
+              --data "{\"text\":\"$MSG\"}" && echo "Slack 通知送信済み" || echo "Slack 通知失敗"
+          fi
+          if [ -n "$LINE_NOTIFY_TOKEN" ]; then
+            curl -s -X POST "https://notify-api.line.me/api/notify" \
+              -H "Authorization: Bearer $LINE_NOTIFY_TOKEN" \
+              --data-urlencode "message=$MSG" && echo "LINE 通知送信済み" || echo "LINE 通知失敗"
+          fi

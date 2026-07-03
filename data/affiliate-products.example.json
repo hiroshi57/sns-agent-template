@@ -1,0 +1,35 @@
+{
+  "updatedAt": "2026-01-01",
+  "rankingPeriod": "今週",
+  "rankingTitle": "AIガジェット 今週の売れ筋ランキング TOP3",
+  "products": [
+    {
+      "id": "sample-laptop",
+      "name": "サンプルノートPC（プレースホルダー）",
+      "category": "PC/Mac",
+      "affiliateUrl": "https://hb.afl.rakuten.co.jp/ichiba/YOUR_AFFILIATE_ID/?pc=https%3A%2F%2Fitem.rakuten.co.jp%2FYOUR_SHOP%2FYOUR_ITEM%2F",
+      "price": 99800,
+      "rating": 4.5,
+      "reviewCount": 1000,
+      "salesRank": 1,
+      "trendScore": 9.0,
+      "releaseYear": 2025,
+      "highlight": "ここに製品の推しポイントを1行で記載します",
+      "tags": ["ノートPC", "AI", "サンプル"]
+    },
+    {
+      "id": "sample-earbuds",
+      "name": "サンプルワイヤレスイヤホン（プレースホルダー）",
+      "category": "オーディオ",
+      "affiliateUrl": "https://www.amazon.co.jp/dp/YOUR_ASIN?tag=YOUR_AFFILIATE_ID-22",
+      "price": 19800,
+      "rating": 4.3,
+      "reviewCount": 500,
+      "salesRank": 2,
+      "trendScore": 8.0,
+      "releaseYear": 2025,
+      "highlight": "Amazon アソシエイトの場合は tag= に自分のアソシエイトIDを設定します",
+      "tags": ["イヤホン", "サンプル"]
+    }
+  ]
+}

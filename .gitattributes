@@ -1,0 +1,16 @@
+# .gitattributes — chatwork-x-automation
+# 行末を LF に統一（Windows CRLF 問題の根絶）
+
+* text=auto eol=lf
+
+# バイナリファイルは変換しない
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+
+# Windows バッチファイルは CRLF のまま
+*.bat text eol=crlf
+*.cmd text eol=crlf

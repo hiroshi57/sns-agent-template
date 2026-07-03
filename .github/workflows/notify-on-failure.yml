@@ -1,0 +1,90 @@
+name: 失敗通知
+
+# ─────────────────────────────────────────────────────────────────
+# 主要ワークフローが失敗したときに Chatwork / LINE / Slack へ通知する。
+#
+# 必須 GitHub Secrets:
+#   CHATWORK_API_TOKEN  … Chatwork API トークン
+#   CHATWORK_ROOM_ID    … 通知先ルーム ID
+# オプション Secrets（いずれか設定すると追加通知）:
+#   LINE_NOTIFY_TOKEN   … LINE Notify トークン
+#   SLACK_WEBHOOK_URL   … Slack Incoming Webhook URL
+# ─────────────────────────────────────────────────────────────────
+
+on:
+  workflow_run:
+    workflows:
+      - "Chatwork → X 自動投稿"
+      - "Instagram / Threads 自動投稿"
+      - "TikTok 自動投稿"
+      - "note 日次まとめ記事投稿"
+      - "PDCA 戦略分析サイクル"
+      - "MicroApps 自動紹介投稿"
+    types: [completed]
+
+jobs:
+  notify-failure:
+    name: 失敗通知
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    timeout-minutes: 5
+
+    steps:
+      - name: 通知内容を構成
+        id: msg
+        run: |
+          WORKFLOW="${{ github.event.workflow_run.name }}"
+          RUN_URL="${{ github.event.workflow_run.html_url }}"
+          STARTED="${{ github.event.workflow_run.run_started_at }}"
+          JST=$(date -d "$STARTED" '+%Y-%m-%d %H:%M JST' 2>/dev/null || echo "$STARTED")
+          NL=$'\n'
+          BODY="[info][title]❌ GitHub Actions 失敗[/title]ワークフロー: ${WORKFLOW}${NL}開始時刻: ${JST}${NL}詳細URL: ${RUN_URL}${NL}${NL}→ GitHub Actions を確認してください[/info]"
+          echo "body<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$BODY" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "workflow=$WORKFLOW" >> "$GITHUB_OUTPUT"
+          echo "run_url=$RUN_URL" >> "$GITHUB_OUTPUT"
+
+      # ── Chatwork（必須）──────────────────────────────────────
+      - name: Chatwork 通知
+        env:
+          CHATWORK_API_TOKEN: ${{ secrets.CHATWORK_API_TOKEN }}
+          CHATWORK_ROOM_ID: ${{ secrets.CHATWORK_ROOM_ID }}
+        run: |
+          if [ -z "$CHATWORK_API_TOKEN" ] || [ -z "$CHATWORK_ROOM_ID" ]; then
+            echo "⚠️  CHATWORK_API_TOKEN または CHATWORK_ROOM_ID が未設定です"
+            exit 0
+          fi
+          BODY="${{ steps.msg.outputs.body }}"
+          curl -s -X POST "https://api.chatwork.com/v2/rooms/${CHATWORK_ROOM_ID}/messages" \
+            -H "X-ChatWorkToken: ${CHATWORK_API_TOKEN}" \
+            --data-urlencode "body=${BODY}" \
+            && echo "✅ Chatwork 通知送信完了" \
+            || echo "⚠️  Chatwork 通知失敗（継続）"
+
+      # ── LINE Notify（オプション）──────────────────────────────
+      - name: LINE Notify
+        if: env.LINE_NOTIFY_TOKEN != ''
+        env:
+          LINE_NOTIFY_TOKEN: ${{ secrets.LINE_NOTIFY_TOKEN }}
+        run: |
+          NL=$'\n'
+          MESSAGE="❌ Actions失敗: ${{ steps.msg.outputs.workflow }}${NL}詳細: ${{ steps.msg.outputs.run_url }}"
+          curl -s -X POST https://notify-api.line.me/api/notify \
+            -H "Authorization: Bearer $LINE_NOTIFY_TOKEN" \
+            -F "message=$MESSAGE" \
+            || echo "LINE 通知失敗（継続）"
+
+      # ── Slack（オプション）───────────────────────────────────
+      - name: Slack 通知
+        if: env.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          PAYLOAD=$(printf '{"text":"❌ *Actions失敗*: %s\n詳細: %s"}' \
+            "${{ steps.msg.outputs.workflow }}" \
+            "${{ steps.msg.outputs.run_url }}")
+          curl -s -X POST "$SLACK_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            || echo "Slack 通知失敗（継続）"

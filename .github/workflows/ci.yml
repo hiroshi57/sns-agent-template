@@ -1,0 +1,59 @@
+name: CI（TypeScript チェック）
+
+# ─────────────────────────────────────────────────────────────────
+# 目的:
+#   push / PR 時に TypeScript の型エラーを検知する。
+#   dist/ なしで PM2 や Actions が起動してサイレントクラッシュする
+#   問題を事前に防ぐ。
+# ─────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches:
+      - main
+      - 'feature/**'
+      - 'fix/**'
+  pull_request:
+
+jobs:
+  typecheck:
+    name: TypeScript 型チェック
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── ワークフロー YAML 構文チェック（2026-07-01 全停止事故の再発防止）──
+      # 検証ロジックは scripts/validate-workflows.py に分離し、CI 側は呼ぶだけ。
+      # （YAML 内に検証コードを埋め込むと、それ自体が破損リスクになるため）
+      - name: ワークフロー YAML 構文チェック
+        run: |
+          pip install pyyaml --quiet
+          python3 scripts/validate-workflows.py
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install --prefer-offline
+
+      - name: TypeScript 型チェック（tsc --noEmit）
+        run: npx tsc --noEmit
+        # dist/ を生成せずに型エラーのみ検知する
+        # エラーがあれば Exit Code 1 で CI が失敗する
+
+      - name: ユニットテスト（Jest）
+        run: npm test
+        # tests/ 配下の *.test.ts を実行（#49）
+
+      - name: ビルド確認（dist/ 生成）
+        run: npm run build
+        # 実際に dist/ が生成できるかも確認
+        # PM2 起動前に必須

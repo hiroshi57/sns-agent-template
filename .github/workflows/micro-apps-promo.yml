@@ -1,0 +1,101 @@
+name: MicroApps 自動紹介投稿
+
+on:
+  schedule:
+    # 毎日 8:30 JST (23:30 UTC) に投稿
+    - cron: '30 23 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'dry-run モード（投稿しない）'
+        type: boolean
+        default: false
+
+jobs:
+  post-micro-app:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 既存の配信ログを git から取得（蓄積を継続するため）──
+      - name: Pull latest delivery log from git
+        run: |
+          mkdir -p data
+          git fetch origin main --quiet
+          git checkout origin/main -- data/micro-apps-post-log.jsonl 2>/dev/null || true
+          touch data/micro-apps-post-log.jsonl
+          echo "=== 配信ログ件数（git 最新版）==="
+          wc -l data/micro-apps-post-log.jsonl
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install --prefer-offline
+
+      - name: Restore X session
+        env:
+          X_SESSION_JSON: ${{ secrets.X_SESSION_JSON }}
+        run: |
+          mkdir -p state
+          echo "$X_SESSION_JSON" > state/x-session.json
+
+      - name: Post MicroApp intro (通常)
+        if: ${{ !inputs.dry_run }}
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          X_EMAIL: ${{ secrets.X_EMAIL }}
+          X_PASSWORD: ${{ secrets.X_PASSWORD }}
+          X_USERNAME: ${{ secrets.X_USERNAME }}
+        run: npm run apps:post
+
+      - name: Post MicroApp intro (dry-run)
+        if: ${{ inputs.dry_run }}
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: npm run apps:post:dry-run
+
+      # ── 配信ログをリポジトリに書き戻す（ダッシュボードが参照）──
+      - name: Save delivery log to repository
+        if: always() && !inputs.dry_run
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f data/micro-apps-post-log.jsonl 2>/dev/null || true
+          if git diff --staged --quiet; then
+            echo "配信ログ変更なし。スキップします。"
+          else
+            git commit -m "chore: update micro-apps delivery log $(date -u +%Y-%m-%dT%H:%M:%SZ) [skip ci]"
+            for i in 1 2 3; do
+              if git push origin HEAD:main; then
+                echo "✅ 配信ログ push 成功（試行 ${i}）"
+                break
+              fi
+              echo "⚠️  push 失敗（試行 ${i}/3）。fetch してリトライ..."
+              git fetch origin main
+              if ! git rebase origin/main; then
+                git checkout --theirs data/micro-apps-post-log.jsonl 2>/dev/null || true
+                git add -f data/micro-apps-post-log.jsonl
+                git rebase --continue || git rebase --skip
+              fi
+              sleep 5
+            done
+          fi
+
+      - name: Save updated X session
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: x-session
+          path: state/x-session.json
+          retention-days: 1
