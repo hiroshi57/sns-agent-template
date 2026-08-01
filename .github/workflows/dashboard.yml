@@ -63,14 +63,15 @@ jobs:
           # リモートに gh-pages が存在すればそれを worktree に追加、
           # 無ければ孤立ブランチとして新規作成する。
           # 2026-08-01発見: `git worktree add <path> --orphan <branch>` は
-          # <branch> を新規ブランチ名として作成する構文であり、既存の
-          # リモートブランチ名を commit-ish として渡すと
+          # <branch> が commit-ish として解釈され
           # `fatal: option '--orphan' and commit-ish cannot be used together`
-          # で失敗する。存在確認を先に行い分岐を明確にする。
+          # で失敗する（`git worktree add --help`によると --orphan は新規
+          # ブランチ名を取らないフラグで、新規ブランチ名の指定には
+          # `-b <branch>` の併用が必要：`--orphan -b <branch> <path>`）。
           if git show-ref --verify --quiet refs/remotes/origin/gh-pages; then
             git worktree add /tmp/gh-pages gh-pages
           else
-            git worktree add /tmp/gh-pages --orphan gh-pages
+            git worktree add --orphan -b gh-pages /tmp/gh-pages
             (cd /tmp/gh-pages && git rm -rf . 2>/dev/null || true)
           fi
 
