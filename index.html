@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI News Bot ダッシュボード</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body { font-family: 'Segoe UI', sans-serif; margin: 0; padding: 20px; background: #f5f5f5; color: #333; }
+    h1 { color: #1a1a2e; }
+    .cards { display: flex; gap: 16px; flex-wrap: wrap; margin: 20px 0; }
+    .card { background: white; border-radius: 12px; padding: 20px 28px; box-shadow: 0 2px 8px rgba(0,0,0,.08); min-width: 140px; }
+    .card .label { font-size: 12px; color: #888; text-transform: uppercase; }
+    .card .value { font-size: 32px; font-weight: 700; margin-top: 4px; }
+    .card .value.green { color: #22c55e; }
+    .card .value.yellow { color: #f59e0b; }
+    .card .value.red { color: #ef4444; }
+    .chart-box { background: white; border-radius: 12px; padding: 24px; box-shadow: 0 2px 8px rgba(0,0,0,.08); margin: 20px 0; }
+    table { width: 100%; border-collapse: collapse; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,.08); }
+    th { background: #1a1a2e; color: white; padding: 12px 16px; text-align: center; font-size: 13px; }
+    td { padding: 10px 16px; text-align: center; border-bottom: 1px solid #eee; font-size: 13px; }
+    tr:last-child td { border-bottom: none; }
+    .green { color: #22c55e; font-weight: 600; }
+    .yellow { color: #f59e0b; font-weight: 600; }
+    .red { color: #ef4444; font-weight: 600; }
+    .footer { text-align: center; color: #aaa; font-size: 12px; margin-top: 32px; }
+  </style>
+</head>
+<body>
+  <h1>🤖 AI News Bot ダッシュボード</h1>
+  <p style="color:#888; font-size:13px;">最終更新: 2026-08-01 04:26:47 UTC</p>
+
+  <div class="cards">
+    <div class="card">
+      <div class="label">直近7日平均</div>
+      <div class="value red">0</div>
+    </div>
+    <div class="card">
+      <div class="label">総成功投稿</div>
+      <div class="value green">0</div>
+    </div>
+    <div class="card">
+      <div class="label">総失敗</div>
+      <div class="value green">0</div>
+    </div>
+    <div class="card">
+      <div class="label">エラー率</div>
+      <div class="value green">0%</div>
+    </div>
+  </div>
+
+  <div class="chart-box">
+    <h2>📊 プラットフォーム別 日次投稿数（直近14日）</h2>
+    <canvas id="chart" style="max-height:400px"></canvas>
+  </div>
+
+  <h2>📅 日別詳細</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>日付</th>
+        <th>X</th>
+        <th>Instagram</th>
+        <th>TikTok</th>
+        <th>note</th>
+        <th>合計</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+      <td>2026-08-01</td>
+      <td>0</td><td>0</td><td>0</td><td>0</td>
+      <td><span class="red">❌ 0</span></td>
+    </tr>
+<tr>
+      <td>2026-07-31</td>
+      <td>0</td><td>0</td><td>0</td><td>0</td>
+      <td><span class="red">❌ 0</span></td>
+    </tr>
+<tr>
+      <td>2026-07-30</td>
+      <td>0</td><td>0</td><td>0</td><td>0</td>
+      <td><span class="red">❌ 0</span></td>
+    </tr>
+<tr>
+      <td>2026-07-29</td>
+      <td>0</td><td>0</td><td>0</td><td>0</td>
+      <td><span class="red">❌ 0</span></td>
+    </tr>
+<tr>
+      <td>2026-07-28</td>
+      <td>0</td><td>0</td><td>0</td><td>0</td>
+      <td><span class="red">❌ 0</span></td>
+    </tr>
+<tr>
+      <td>2026-07-27</td>
+      <td>0</td><td>0</td><td>0</td><td>0</td>
+      <td><span class="red">❌ 0</span></td>
+    </tr>
+<tr>
+      <td>2026-07-26</td>
+      <td>0</td><td>0</td><td>0</td><td>0</td>
+      <td><span class="red">❌ 0</span></td>
+    </tr>
+<tr>
+      <td>2026-07-25</td>
+      <td>0</td><td>0</td><td>0</td><td>0</td>
+      <td><span class="red">❌ 0</span></td>
+    </tr>
+<tr>
+      <td>2026-07-24</td>
+      <td>0</td><td>0</td><td>0</td><td>0</td>
+      <td><span class="red">❌ 0</span></td>
+    </tr>
+<tr>
+      <td>2026-07-23</td>
+      <td>0</td><td>0</td><td>0</td><td>0</td>
+      <td><span class="red">❌ 0</span></td>
+    </tr>
+<tr>
+      <td>2026-07-22</td>
+      <td>0</td><td>0</td><td>0</td><td>0</td>
+      <td><span class="red">❌ 0</span></td>
+    </tr>
+<tr>
+      <td>2026-07-21</td>
+      <td>0</td><td>0</td><td>0</td><td>0</td>
+      <td><span class="red">❌ 0</span></td>
+    </tr>
+<tr>
+      <td>2026-07-20</td>
+      <td>0</td><td>0</td><td>0</td><td>0</td>
+      <td><span class="red">❌ 0</span></td>
+    </tr>
+<tr>
+      <td>2026-07-19</td>
+      <td>0</td><td>0</td><td>0</td><td>0</td>
+      <td><span class="red">❌ 0</span></td>
+    </tr>
+    </tbody>
+  </table>
+
+  <div class="footer">KPI 目標: 日次 ≥15件 / エラー率 ≤10%</div>
+
+  <script>
+    new Chart(document.getElementById('chart'), {
+      type: 'bar',
+      data: {"labels":["2026-07-19","2026-07-20","2026-07-21","2026-07-22","2026-07-23","2026-07-24","2026-07-25","2026-07-26","2026-07-27","2026-07-28","2026-07-29","2026-07-30","2026-07-31","2026-08-01"],"datasets":[{"label":"x","data":[0,0,0,0,0,0,0,0,0,0,0,0,0,0],"backgroundColor":"rgba(29, 161, 242, 0.8)","borderColor":"rgb(29, 161, 242)","borderWidth":2},{"label":"instagram","data":[0,0,0,0,0,0,0,0,0,0,0,0,0,0],"backgroundColor":"rgba(193, 53, 132, 0.8)","borderColor":"rgb(193, 53, 132)","borderWidth":2},{"label":"tiktok","data":[0,0,0,0,0,0,0,0,0,0,0,0,0,0],"backgroundColor":"rgba(0, 0, 0, 0.8)","borderColor":"rgb(0, 0, 0)","borderWidth":2},{"label":"note","data":[0,0,0,0,0,0,0,0,0,0,0,0,0,0],"backgroundColor":"rgba(0, 199, 170, 0.8)","borderColor":"rgb(0, 199, 170)","borderWidth":2}]},
+      options: {
+        responsive: true,
+        plugins: { legend: { position: 'top' } },
+        scales: {
+          x: { stacked: true },
+          y: {
+            stacked: true, beginAtZero: true,
+            ticks: { stepSize: 5 },
+          },
+        },
+      },
+    });
+  </script>
+</body>
+</html>
